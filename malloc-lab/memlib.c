@@ -15,9 +15,9 @@
 #include "config.h"
 
 /* private variables */
-static char *mem_start_brk;  /* points to first byte of heap */
-static char *mem_brk;        /* points to last byte of heap */
-static char *mem_max_addr;   /* largest legal heap address */ 
+static char *mem_start_brk; // 힙의 시작             /* points to first byte of heap */
+static char *mem_brk;       // 현재 brk(힙의 끝)     /* points to last byte of heap */
+static char *mem_max_addr;  // 힙 최댓값             /* largest legal heap address */ 
 
 /* 
  * mem_init - initialize the memory system model
@@ -43,7 +43,8 @@ void mem_deinit(void)
 }
 
 /*
- * mem_reset_brk - reset the simulated brk pointer to make an empty heap
+ * mem_reset_brk - reset the s
+ imulated brk pointer to make an empty heap
  */
 void mem_reset_brk()
 {
@@ -55,7 +56,7 @@ void mem_reset_brk()
  *    by incr bytes and returns the start address of the new area. In
  *    this model, the heap cannot be shrunk.
  */
-void *mem_sbrk(int incr) 
+void *mem_sbrk(int incr) //
 {
     char *old_brk = mem_brk;
 

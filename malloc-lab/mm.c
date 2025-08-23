@@ -43,17 +43,46 @@ team_t team = {
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
 /*
- * mm_init - initialize the malloc package.
+ * mm_init - initialize the malloc package. 초기 설정
  */
+
+#define WSIZE 4 // 1워드 = 4B
+#define DSIZE 8 // 2워드 = 더블워드 = 8B
+#define CHUNKSIZE (1 << 12) //2^12 최소 힙 확장 크기
+
+#define PACK(size, alloc) ((unsigned)((size)|(alloc))) // 각 데이터 블럭 당 헤더
+#define PUT(p, val) (*(unsigned*)(p) = (val)) // 주소값에 해당 데이터 블럭 넣기
+
+static char *heap_listp = NULL; // 실질적 주소는 프롤로그 블록이므로 
+
 int mm_init(void)
 {
+    PUT(heap_listp, 0); // padding (4B)
+    PUT(heap_listp + (WSIZE), PACK(DSIZE, 1)); // 에필로그 헤더 (8/alloc)
+    PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1)); // 에필로그 풋터 (8/alloc)
+    PUT(heap_listp + (3 * WSIZE), PACK(0,1)); // 프롤로그 헤더 (0/alloc)
+    heap_listp += (2 * WSIZE); // 페이로드 시작 지점
+
+    if(extend_heap(heap_listp / WSIZE) ==  NULL){
+        return -1;
+    }
+
     return 0;
+}
+
+static void *extend_heap(size_t words) // 힙을 워드만큼 확장하여 가용블록으로 초기화
+{
+    char *bp; // 
+    size_t size;
+
+
 }
 
 /*
  * mm_malloc - Allocate a block by incrementing the brk pointer.
  *     Always allocate a block whose size is a multiple of the alignment.
  */
+
 void *mm_malloc(size_t size)
 {
     int newsize = ALIGN(size + SIZE_T_SIZE);
@@ -72,6 +101,7 @@ void *mm_malloc(size_t size)
  */
 void mm_free(void *ptr)
 {
+    
 }
 
 /*
