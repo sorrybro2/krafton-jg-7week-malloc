@@ -98,7 +98,9 @@ static void *extend_heap(size_t words) // 힙을 워드만큼 확장하여 가�
     // 새로 생긴 가용 블록의 헤더 풋터 가용 데이터이므로 alloc = 0
     PUT(HDRP(bp), PACK(size, 0)); // new free header
     PUT(FTRP(bp), PACK(size, 0)); // new free footer
-    PUT(HDRP(NEXT_BLKP(bp)), PACK(size, 0)) // new epligue
+
+    // 새 에필로그 헤더 (size = 0, alloc = 1)
+    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1)); // new epligue
 
     // 인접 free와 병합
     return coalesce(bp);
@@ -159,7 +161,10 @@ void *mm_malloc(size_t size)
  */
 void mm_free(void *ptr)
 {
-    
+    size_t size = GET_SIZE(HDRP(ptr)); // 해당 위치에 있는 사이즈만 빼옴
+    PUT(HDRP(ptr), PACK(size, 0)); // 
+    PUT(FTRP(ptr), PACK(size, 0));
+    coalesce(ptr);
 }
 
 /*
