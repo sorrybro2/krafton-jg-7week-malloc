@@ -38,7 +38,7 @@ team_t team = {
 #define ALIGNMENT 8
 
 /* rounds up to the nearest multiple of ALIGNMENT */
-#define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~0x7)
+#define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~0x7) // 항상 8의 배수로 맞춤
 
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
@@ -61,23 +61,34 @@ team_t team = {
 #define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE) // 블록 포인터로부터 footer 위치 계산
 
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE((char *)(bp) - WSIZE)) // 다음 블록의 payload 시작 주소
-#define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE((char))) // 현재 블록 바로 앞에 있는 블록의 payload 시작 주소
+#define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE((char *)(bp) - DSIZE)) // 현재 블록 바로 앞에 있는 블록의 payload 시작 주소
 
-#define ALIGN(size) (((size) + (DSIZE-1)) & ~0x7) // 항상 8의 배수로 맞춤
 #define MAX(x, y) ((x) > (y) ? (x) : (y)) // 둘이 비교해서 큰거
 #define MIN_BLOCK (2*DSIZE) // (header+footer)(8) + 최소 payload(8) = 16B 
 
 static char *heap_listp = NULL; // 실질적 주소는 프롤로그 블록이므로 
 
+/* ===== 함수 원형 선언 ===== */
+static void *extend_heap(size_t words);
+static void *coalesce(void *bp);
+static void *find_fit(size_t asize);
+static void place(void *bp, size_t asize);
+
+
 int mm_init(void)
 {
+    // 프롤로그 에필로그 포함 16B 공간 확보 <- heap_listp 초기화
+    if ((heap_listp = mem_sbrk(4*WSIZE)) == (void *)-1){
+        return -1;
+    }
+
     PUT(heap_listp, 0); // padding (4B)
     PUT(heap_listp + (WSIZE), PACK(DSIZE, 1)); // 에필로그 헤더 (8/alloc)
     PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1)); // 에필로그 풋터 (8/alloc)
     PUT(heap_listp + (3 * WSIZE), PACK(0,1)); // 프롤로그 헤더 (0/alloc)
     heap_listp += (2 * WSIZE); // 페이로드 시작 지점
 
-    if(extend_heap(heap_listp / WSIZE) ==  NULL){ // 확장되는 힙이 8배수 정렬 유지가 안됐다면
+    if((extend_heap(CHUNKSIZE / WSIZE)) ==  NULL){ // 확장되는 힙이 8배수 정렬 유지가 안됐다면
         return -1;
     }
 
@@ -107,7 +118,7 @@ static void *extend_heap(size_t words) // 힙을 워드만큼 확장하여 가�
 }
 
 // 인접 free와 새로 추가된 가용 블록과 병합
-static void coalesce(void *bp)
+static void *coalesce(void *bp)
 {
     // 이전 블록의 alloc 할당을 탐색하므로 PREV_BLKP 이전 블록의 payload에 위치한 FDRP 푸터를 검색
     unsigned prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
@@ -149,16 +160,17 @@ static void *find_fit(size_t asize)
     for(bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)){
         // 가용블록 (alloc = 0)이고 들어갈 메모리 크기가 넣는 메모리 크기보다 작거나 같아야 함
         // 그래야 들어갈 첫 블럭을 찾지!
-        if (!GET_ALLOC(bp) && asize <= GET_SIZE(HDRP(bp))){
+        if (!GET_ALLOC(HDRP(bp)) && asize <= GET_SIZE(HDRP(bp))){
             return bp;
         }
-        return NULL; //no fit
     }
+    return NULL; //no fit
 }
 
-static void *place(void *bp, size_t asize)
+static void place(void *bp, size_t asize)
 {
-    void *csize = GET_SIZE(HDRP(bp));
+    //할당할 가용 블록
+    size_t csize = GET_SIZE(HDRP(bp));
 
     // 전체 크기에서 넣는 메모리 크기가 16b 이상일 때, 남는 메모리를 alloc과 free로 분할
     if(csize - asize >= 2*DSIZE){
@@ -177,8 +189,8 @@ static void *place(void *bp, size_t asize)
     // 16b 미만일 경우 헤더/푸터만으로 거의 다 먹거나 
     // 다음 번 할당에 쓸 수 없는 쪼가리(spliter)가 되서 그냥 alloc만 함
     }else{
-        PUT(HDRP(bp), PACK(asize, 1));
-        PUT(FTRP(bp), PACK(asize, 1));
+        PUT(HDRP(bp), PACK(csize, 1));
+        PUT(FTRP(bp), PACK(csize, 1));
     }
 }
 
@@ -189,15 +201,32 @@ static void *place(void *bp, size_t asize)
 
 void *mm_malloc(size_t size)
 {
-    int newsize = ALIGN(size + SIZE_T_SIZE);
-    void *p = mem_sbrk(newsize);
-    if (p == (void *)-1)
-        return NULL;
-    else
-    {
-        *(size_t *)p = size;
-        return (void *)((char *)p + SIZE_T_SIZE);
+    size_t asize; // 8의 배수로 조정할 블록 크기
+    size_t extendsize; // 확장한 블록 크기
+    char *bp;
+
+    if(size == 0) return NULL; // 0 할당하면 당연히 NULL
+
+    // 헤더(4B)+푸터(4B) 8B 오버헤드 결과를 8의 배수로 하되, 최소 크기는 16B
+    //**오버헤드(overhead)**는 “실제 유저가 쓰는 데이터(payload) 외에, 동작을 관리·유지하기 위해 추가로 드는 비용”
+    asize = ALIGN(size + DSIZE);
+    if (asize <= 2 * DSIZE) asize = 2 * DSIZE;
+
+    // 적합 블럭 탐색
+    // find_fit으로 들어갈 곳 탐색 (현재 방법 : first_fit)
+    if ((bp = find_fit(asize)) != NULL){ // 만약에 들어갈 곳이 있으면
+        place(bp, asize); // 적합한 블록에 asize만큼 할당
+        return bp;
     }
+
+    // 없으면 힙 확장 후 배치
+    extendsize = MAX(asize, CHUNKSIZE); //최소 2^12 = 4KB
+    if ((bp = extend_heap(extendsize/WSIZE)) == NULL){ // 추가적인 힙을 추가함
+        return NULL; // 추가가 안되면 NULL 리턴
+    }
+
+    place(bp, asize); // 적합한 블록(방금 추가한 힙)에 asize만큼 할당
+    return bp;
 }
 
 /*
@@ -206,9 +235,9 @@ void *mm_malloc(size_t size)
 void mm_free(void *ptr)
 {
     size_t size = GET_SIZE(HDRP(ptr)); // 해당 위치에 있는 사이즈만 빼옴
-    PUT(HDRP(ptr), PACK(size, 0)); // 
+    PUT(HDRP(ptr), PACK(size, 0)); // 가용 블럭 생성
     PUT(FTRP(ptr), PACK(size, 0));
-    coalesce(ptr);
+    coalesce(ptr); // 앞뒤에 가용블럭이 있다면 가용 블럭끼리 합침
 }
 
 /*
