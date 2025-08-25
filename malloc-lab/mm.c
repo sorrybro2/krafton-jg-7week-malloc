@@ -66,7 +66,8 @@ team_t team = {
 #define MAX(x, y) ((x) > (y) ? (x) : (y)) // 둘이 비교해서 큰거
 #define MIN_BLOCK (2*DSIZE) // (header+footer)(8) + 최소 payload(8) = 16B 
 
-static char *heap_listp = NULL; // 실질적 주소는 프롤로그 블록이므로 
+static char *heap_listp = NULL; // 실질적 주소는 프롤로그 블록이므로
+static char *rover = NULL; // next-fit용 탐색 시작 지점! 
 
 /* ===== 함수 원형 선언 ===== */
 static void *extend_heap(size_t words);
@@ -92,6 +93,8 @@ int mm_init(void)
         return -1;
     }
 
+    // next-fit에서 사용할 rover 변수 생성
+    rover = heap_listp;
     return 0;
 }
 
@@ -148,49 +151,103 @@ static void *coalesce(void *bp)
     return bp; //합병 완!
 }
 
-//first_fit으로 구현!
+//first_fit find_fit 함수로 구현!
+// static void *find_fit(size_t asize)
+// {
+//     // find_fit 안에서의 지역 변수
+//     void *bp;
+
+//     // 시작 : 전역변수 heap_listp 힙 시작 주소
+//     // 끝 : 에필로그(size = 0) 만나면 종료
+//     // 진행 : NEXT_BLKP(bp)로 한 블럭씩
+//     for(bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)){
+//         // 가용블록 (alloc = 0)이고 들어갈 메모리 크기가 넣는 메모리 크기보다 작거나 같아야 함
+//         // 그래야 들어갈 첫 블럭을 찾지!
+//         if (!GET_ALLOC(HDRP(bp)) && asize <= GET_SIZE(HDRP(bp))){
+//             return bp;
+//         }
+//     }
+//     return NULL; //no fit
+// }
+
+//next_fit find_fit 함수로 구현!
 static void *find_fit(size_t asize)
 {
-    // find_fit 안에서의 지역 변수
     void *bp;
 
-    // 시작 : 전역변수 heap_listp 힙 시작 주소
-    // 끝 : 에필로그(size = 0) 만나면 종료
-    // 진행 : NEXT_BLKP(bp)로 한 블럭씩
-    for(bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)){
-        // 가용블록 (alloc = 0)이고 들어갈 메모리 크기가 넣는 메모리 크기보다 작거나 같아야 함
-        // 그래야 들어갈 첫 블럭을 찾지!
-        if (!GET_ALLOC(HDRP(bp)) && asize <= GET_SIZE(HDRP(bp))){
+    // rover에서 힙 끝까지
+    for(bp = rover; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)){
+        if(!GET_ALLOC(HDRP(bp)) && asize <= GET_SIZE(HDRP(bp))){
+            rover = bp; // 찾은 위치를 rover에 기록
             return bp;
         }
     }
+
+    // 힙 시작에서 rover까지
+    for(bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)){
+        if(!GET_ALLOC(HDRP(bp)) && asize <= GET_SIZE(HDRP(bp))){
+            rover = bp; // 찾은 위치를 rover에 기록
+            return bp;
+        }
+    }
+
     return NULL; //no fit
 }
 
+// first-fit-place함수
+// static void place(void *bp, size_t asize)
+// {
+//     //할당할 가용 블록
+//     size_t csize = GET_SIZE(HDRP(bp));
+
+//     // 전체 크기에서 넣는 메모리 크기가 16b 이상일 때, 남는 메모리를 alloc과 free로 분할
+//     if(csize - asize >= 2*DSIZE){
+        
+//         // asize 할당
+//         PUT(HDRP(bp), PACK(asize, 1));
+//         PUT(FTRP(bp), PACK(asize, 1));
+        
+//         // 다음 블럭으로 넘어감
+//         bp = NEXT_BLKP(bp);
+
+//         // 넘어간 블럭에 free 할당
+//         PUT(HDRP(bp), PACK(csize-asize, 0));
+//         PUT(FTRP(bp), PACK(csize-asize, 0));
+
+//     // 16b 미만일 경우 헤더/푸터만으로 거의 다 먹거나 
+//     // 다음 번 할당에 쓸 수 없는 쪼가리(spliter)가 되서 그냥 alloc만 함
+//     }else{
+//         PUT(HDRP(bp), PACK(csize, 1));
+//         PUT(FTRP(bp), PACK(csize, 1));
+//     }
+// }
+
+// next-fit-place함수
 static void place(void *bp, size_t asize)
 {
-    //할당할 가용 블록
     size_t csize = GET_SIZE(HDRP(bp));
 
-    // 전체 크기에서 넣는 메모리 크기가 16b 이상일 때, 남는 메모리를 alloc과 free로 분할
-    if(csize - asize >= 2*DSIZE){
-        
-        // asize 할당
+    if (csize - asize >= 2*DSIZE){
+
+        // 앞쪽에 asize 배치
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
-        
-        // 다음 블럭으로 넘어감
-        bp = NEXT_BLKP(bp);
 
-        // 넘어간 블럭에 free 할당
-        PUT(HDRP(bp), PACK(csize-asize, 0));
-        PUT(FTRP(bp), PACK(csize-asize, 0));
+        void *next = NEXT_BLKP(bp); // 다음 블록 넘어가니까 next 포인터 변수 생성
 
-    // 16b 미만일 경우 헤더/푸터만으로 거의 다 먹거나 
-    // 다음 번 할당에 쓸 수 없는 쪼가리(spliter)가 되서 그냥 alloc만 함
+        // 뒷 블록 free 분할
+        PUT(HDRP(next), PACK(csize-asize, 0));
+        PUT(FTRP(next), PACK(csize-asize, 0));
+
+        // 남은 free 조각을 다음 탐색 시작점으로
+        rover = next;
+
     }else{
         PUT(HDRP(bp), PACK(csize, 1));
         PUT(FTRP(bp), PACK(csize, 1));
+
+        // 할당 블록 다음 블록에 시작점 부여
+        rover = NEXT_BLKP(bp); 
     }
 }
 
