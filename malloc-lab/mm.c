@@ -137,6 +137,50 @@ static void coalesce(void *bp)
     return bp; //합병 완!
 }
 
+//first_fit으로 구현!
+static void *find_fit(size_t asize)
+{
+    // find_fit 안에서의 지역 변수
+    void *bp;
+
+    // 시작 : 전역변수 heap_listp 힙 시작 주소
+    // 끝 : 에필로그(size = 0) 만나면 종료
+    // 진행 : NEXT_BLKP(bp)로 한 블럭씩
+    for(bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)){
+        // 가용블록 (alloc = 0)이고 들어갈 메모리 크기가 넣는 메모리 크기보다 작거나 같아야 함
+        // 그래야 들어갈 첫 블럭을 찾지!
+        if (!GET_ALLOC(bp) && asize <= GET_SIZE(HDRP(bp))){
+            return bp;
+        }
+        return NULL; //no fit
+    }
+}
+
+static void *place(void *bp, size_t asize)
+{
+    void *csize = GET_SIZE(HDRP(bp));
+
+    // 전체 크기에서 넣는 메모리 크기가 16b 이상일 때, 남는 메모리를 alloc과 free로 분할
+    if(csize - asize >= 2*DSIZE){
+        
+        // asize 할당
+        PUT(HDRP(bp), PACK(asize, 1));
+        PUT(FTRP(bp), PACK(asize, 1));
+        
+        // 다음 블럭으로 넘어감
+        bp = NEXT_BLKP(bp);
+
+        // 넘어간 블럭에 free 할당
+        PUT(HDRP(bp), PACK(csize-asize, 0));
+        PUT(FTRP(bp), PACK(csize-asize, 0));
+
+    // 16b 미만일 경우 헤더/푸터만으로 거의 다 먹거나 
+    // 다음 번 할당에 쓸 수 없는 쪼가리(spliter)가 되서 그냥 alloc만 함
+    }else{
+        PUT(HDRP(bp), PACK(asize, 1));
+        PUT(FTRP(bp), PACK(asize, 1));
+    }
+}
 
 /*
  * mm_malloc - Allocate a block by incrementing the brk pointer.
