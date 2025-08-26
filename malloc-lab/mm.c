@@ -250,13 +250,18 @@ static void place(void *bp, size_t asize)
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
 
-        void *next = NEXT_BLKP(bp); // 다음 블록 넘어가니까 next 포인터 변수 생성
+        // bp = NEXT_BLKP(bp); // first_fit
+        void *next = NEXT_BLKP(bp); // next_fit : 다음 블록 넘어가니까 next 포인터 변수 생성
 
-        // 뒷 블록 free 분할
+        // first_fit
+        // PUT(HDRP(bp), PACK(csize-asize, 0));
+        // PUT(FTRP(bp), PACK(csize-asize, 0));
+
+        // next_fit : 뒷 블록 free 분할
         PUT(HDRP(next), PACK(csize-asize, 0));
         PUT(FTRP(next), PACK(csize-asize, 0));
 
-        // 남은 free 조각을 다음 탐색 시작점으로
+        // next_fit : 남은 free 조각을 다음 탐색 시작점으로
         rover = next;
 
     }else{
