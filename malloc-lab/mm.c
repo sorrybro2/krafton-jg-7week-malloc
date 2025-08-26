@@ -66,14 +66,28 @@ team_t team = {
 #define MAX(x, y) ((x) > (y) ? (x) : (y)) // 둘이 비교해서 큰거
 #define MIN_BLOCK (2*DSIZE) // (header+footer)(8) + 최소 payload(8) = 16B 
 
-static char *heap_listp = NULL; // 실질적 주소는 프롤로그 블록이므로
-static char *rover = NULL; // next-fit용 탐색 시작 지점! 
+static char *heap_listp = NULL; // 프롤로그 payLoad
+// static char *rover = NULL; // next-fit용 탐색 시작 지점! 
+
+/* ==== 명시적 가용 리스트 포인터(페이로드 안 2칸 사용) ==== */
+#define PTRSIZE             (sizeof(void *))
+#define PREV_FREEP(bp)      (*(char **)(bp))
+#define NEXT_FREEP(bp)      (*(char **)((char *)(bp) + PTRSIZE))
+#define SET_PREV(bp, p)     (PREV_FREEP(bp) = (char *)(p))
+#define SET_NEXT(bp, p)     (NEXT_FREEP(bp) = (char *)(p))
+
+//명시적
+static char *free_listp = NULL; // 가용 리스트 머리(Head)
 
 /* ===== 함수 원형 선언 ===== */
 static void *extend_heap(size_t words);
 static void *coalesce(void *bp);
 static void *find_fit(size_t asize);
 static void place(void *bp, size_t asize);
+
+// 명시적
+static void insert_free_block(void *bp); // LIFO(head 삽입)
+static void remove_free_block(void *bp); // 리스트에서 제거
 
 
 int mm_init(void)
@@ -84,17 +98,20 @@ int mm_init(void)
     }
 
     PUT(heap_listp, 0); // padding (4B)
-    PUT(heap_listp + (WSIZE), PACK(DSIZE, 1)); // 에필로그 헤더 (8/alloc)
-    PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1)); // 에필로그 풋터 (8/alloc)
-    PUT(heap_listp + (3 * WSIZE), PACK(0,1)); // 프롤로그 헤더 (0/alloc)
+    PUT(heap_listp + (WSIZE), PACK(DSIZE, 1)); // 프롤로그 헤더 (8/alloc)
+    PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1)); // 프롤로그 풋터 (8/alloc)
+    PUT(heap_listp + (3 * WSIZE), PACK(0,1)); // 에필로그 헤더 (0/alloc)
     heap_listp += (2 * WSIZE); // 페이로드 시작 지점
 
     if((extend_heap(CHUNKSIZE / WSIZE)) ==  NULL){ // 확장되는 힙이 8배수 정렬 유지가 안됐다면
         return -1;
     }
 
+    // 명시적 가용 리스트 비움
+    free_listp = NULL;
+
     // next-fit에서 사용할 rover 변수 생성
-    rover = heap_listp;
+    // rover = heap_listp;
     return 0;
 }
 
@@ -103,7 +120,7 @@ static void *extend_heap(size_t words) // 힙을 워드만큼 확장하여 가�
     char *bp; // 새로 확장된 블록의 시작주소를 가리키는 포인터 생성
     size_t size; // 실제로 저장되는 바이트 사이즈
 
-    size = (words % 2) ? (words+1) * WSIZE : words * WSIZE; // 정렬 유지 8배수를 유지하기 위해 
+    size = (words % 2) ? (words + 1) * WSIZE : words * WSIZE; // 정렬 8배수를 유지하기 위해 
 
     if ((bp = mem_sbrk(size)) == (void *)-1){ // 힙 확장 : 실패 시 (void *)-1 -> NULL 반환
         return NULL;
@@ -120,6 +137,41 @@ static void *extend_heap(size_t words) // 힙을 워드만큼 확장하여 가�
     return coalesce(bp);
 }
 
+/* ====== 명시적 가용 리스트 조작 함수 ====== */
+// 가용 리스트 추가 함수
+static void insert_free_block(void *bp)
+{
+    // 참고하셈
+    // #define PREV_FREEP(bp)      (*(char **)(bp))
+    // #define NEXT_FREEP(bp)      (*(char **)((char *)(bp) + PTRSIZE))
+    // #define SET_PREV(bp, p)     (PREV_FREEP(bp) = (char *)(p))
+    // #define SET_NEXT(bp, p)     (NEXT_FREEP(bp) = (char *)(p))
+
+
+    //LIFO(head에 삽입)
+    SET_PREV(bp, NULL); // 새로 넣을 노드 bp가 head가 될 것이므로 이전 노드가 없음. PREV에는 NULL.
+    SET_NEXT(bp, free_listp); // 새 head의 next는 기존 head(= free_listp)를 가리킴.
+
+    // HEAD 이후 더 넣는다면
+    if (free_listp != NULL){ // free_listp에 내용물 있으면
+        SET_PREV(free_listp, bp); // 기존 head의 prev를 bp로 설정
+    }
+    free_listp = (char *)bp; // 헤드 포인터를 bp로 갱신해서 bp가 새 head가 된다!
+}
+
+// 가용 리스트 제거 함수
+static void remove_free_block(void *bp)
+{
+    // 해당 블록의 이전 포인트와 다음 포인트 변수 지정
+    char *prev = PREV_FREEP(bp);
+    char *next = NEXT_FREEP(bp);
+
+    // bp의 왼쪽 이웃(prev)이 있다면, prev->next = next
+    // 없다면 (bp가 head였다면), free_listp = next (head 교체)
+    if (prev) SET_NEXT(prev, next);
+    else    free_listp = next;
+}
+
 // 인접 free와 새로 추가된 가용 블록과 병합
 static void *coalesce(void *bp)
 {
@@ -132,38 +184,79 @@ static void *coalesce(void *bp)
 
     // free 가용 블럭인 경우에만 병합 과정이 이뤄져야한다! (경계 태그 병합 4가지 경우)
     if (prev_alloc && next_alloc){ // 1. 이전과 다음 블록이 할당되어 있을 때 -> 병합 x
-        return bp;
+        // Implicit first, next_fit
+        // return bp;
+
+        // explicit
+        // 양옆이 할당이면 합칠 필요가 없으므로 가용 리스트에 바로 쳐넣는다!
+        insert_free_block(bp);
+
     }else if (prev_alloc && !next_alloc){ // 2. 이전 블록은 할당, 다음 블록은 가용 -> 뒤와 병합
         // next_fit : rover가 [bp, NEXT_BLKP(bp)] 사이였다면 결과 블록 시작으로
-        if ((char *)rover >= bp && (char *)rover <= NEXT_BLKP(bp)){
-            rover = bp;
-        }
+        // if ((char *)rover >= bp && (char *)rover <= NEXT_BLKP(bp)){
+        //     rover = bp;
+        // }
+
+        // explicit
+        // free 블록을 리스트에 제거하고 합친 후 더 큰 free를 삽입
+        void *next = NEXT_BLKP(bp); // next 주소 블록 가져와!
+        remove_free_block(next); // 제거해!
 
         size += GET_SIZE(HDRP(NEXT_BLKP(bp))); // 현재 블록 크기(size)에 뒤에 블록 크기 추가
         PUT(HDRP(bp), PACK(size, 0)); // 헤더 최신화 (현재 위치 유지)
         PUT(FTRP(bp), PACK(size, 0)); // 푸터 최신화 (뒤 블록 위치) -> 뒤와 병합했기 때문!
 
+        // explicit
+        // 병합된 가용 블록 리스트에 넣기
+        insert_free_block(bp);
+
     }else if (!prev_alloc && next_alloc){ // 3. 다음 블록은 할당, 이전 블록이 가용 -> 앞과 병합
         // next_fit : rover가 [PREV_BLKP(bp), bp] 사이였다면 앞 블록 시작으로
-        if ((char *)rover >= (char *)PREV_BLKP(bp) && (char *)rover <= (char *)bp){
-            rover = PREV_BLKP(bp);
-        }
+        // if ((char *)rover >= (char *)PREV_BLKP(bp) && (char *)rover <= (char *)bp){
+        //     rover = PREV_BLKP(bp);
+        // }
 
-        size += GET_SIZE(HDRP(PREV_BLKP(bp))); // 현재 블록 크기에 앞에 블록 크기 추가
-        PUT(FTRP(bp), PACK(size, 0)); // 푸터 최신화 (현재 위치 유지)
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0)); // 헤더 최신화 (앞 블록 위치)
-        bp = PREV_BLKP(bp); // 앞에 붙였으므로 시작점 포인터를 앞에 블록으로 바꿈
+        // explicit
+        // 앞과 병합
+        void *prev = PREV_BLKP(bp); // prev 주소 블록 가져와!
+        remove_free_block(prev); // 제거해!
+
+        size += GET_SIZE(HDRP(prev)); // 합쳐
+        PUT(HDRP(prev), PACK(size, 0)); // 합병한 주소인 prev로 헤더 최신화
+        PUT(FTRP(prev), PACK(size, 0)); // 합병한 주소인 prev로 푸터 최신화
+
+        bp = prev; // bp 주소도 prev로 바꿈
+        insert_free_block(bp);
+
+        // implicit
+        // size += GET_SIZE(HDRP(PREV_BLKP(bp))); // 현재 블록 크기에 앞에 블록 크기 추가
+        // PUT(FTRP(bp), PACK(size, 0)); // 푸터 최신화 (현재 위치 유지)
+        // PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0)); // 헤더 최신화 (앞 블록 위치)
+        // bp = PREV_BLKP(bp); // 앞에 붙였으므로 시작점 포인터를 앞에 블록으로 바꿈
 
     }else{ // 4. 이전 다음 블록 모두 가용 -> 모두 병합
         // next_fit : rover가 [PREV_BLKP(bp), NEXT_BLKP(bp)] 사이였다면 앞 블록 시작
-        if ((char *)bp >= (char *)PREV_BLKP(bp) && (char *)bp <= (char *)NEXT_BLKP(bp)){
-            rover = PREV_BLKP(bp);
-        }
+        // if ((char *)bp >= (char *)PREV_BLKP(bp) && (char *)bp <= (char *)NEXT_BLKP(bp)){
+        //     rover = PREV_BLKP(bp);
+        // }
 
-        size += GET_SIZE(HDRP(NEXT_BLKP(bp))) + GET_SIZE(HDRP(PREV_BLKP(bp))); // 현재 블록 크기에 앞+뒤 블록 크기 추가
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0)); // 헤더 최신화 (앞 블록 위치)
-        PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0)); // 푸터 최신화 (뒤 블록 위치)
-        bp = PREV_BLKP(bp); // 시작 포인터 전 블록으로 바꿈
+        void *prev = PREV_BLKP(bp); // 전 블록
+        void *next = NEXT_BLKP(bp); // 다음 블록 변수 
+        remove_free_block(prev); // 전 블록 제거
+        remove_free_block(next); // 다음 블록 제거
+
+        size += GET_SIZE(HDRP(prev)) + GET_SIZE(HDRP(next)); // 합쳐 
+        PUT(HDRP(prev), PACK(size, 0)); // 헤더 최신화
+        PUT(FTRP(prev), PACK(size, 0)); // 푸터 최신화
+
+        bp = prev; // bp 주소 prev로 바꿈
+        insert_free_block(bp);
+
+        // implicit
+        // size += GET_SIZE(HDRP(NEXT_BLKP(bp))) + GET_SIZE(HDRP(PREV_BLKP(bp))); // 현재 블록 크기에 앞+뒤 블록 크기 추가
+        // PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0)); // 헤더 최신화 (앞 블록 위치)
+        // PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0)); // 푸터 최신화 (뒤 블록 위치)
+        // bp = PREV_BLKP(bp); // 시작 포인터 전 블록으로 바꿈
     }
     return bp; //합병 완!
 }
@@ -191,7 +284,6 @@ static void *coalesce(void *bp)
 static void *find_fit(size_t asize)
 {
     void *bp;
-
     // rover에서 힙 끝까지
     for(bp = rover; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)){
         if(!GET_ALLOC(HDRP(bp)) && asize <= GET_SIZE(HDRP(bp))){
