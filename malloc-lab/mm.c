@@ -132,17 +132,34 @@ static void *coalesce(void *bp)
 
     // free 가용 블럭인 경우에만 병합 과정이 이뤄져야한다! (경계 태그 병합 4가지 경우)
     if (prev_alloc && next_alloc){ // 1. 이전과 다음 블록이 할당되어 있을 때 -> 병합 x
-        return bp; // 
+        return bp;
     }else if (prev_alloc && !next_alloc){ // 2. 이전 블록은 할당, 다음 블록은 가용 -> 뒤와 병합
+        // next_fit : rover가 [bp, NEXT_BLKP(bp)] 사이였다면 결과 블록 시작으로
+        if ((char *)rover >= bp && (char *)rover <= NEXT_BLKP(bp)){
+            rover = bp;
+        }
+
         size += GET_SIZE(HDRP(NEXT_BLKP(bp))); // 현재 블록 크기(size)에 뒤에 블록 크기 추가
         PUT(HDRP(bp), PACK(size, 0)); // 헤더 최신화 (현재 위치 유지)
         PUT(FTRP(bp), PACK(size, 0)); // 푸터 최신화 (뒤 블록 위치) -> 뒤와 병합했기 때문!
+
     }else if (!prev_alloc && next_alloc){ // 3. 다음 블록은 할당, 이전 블록이 가용 -> 앞과 병합
+        // next_fit : rover가 [PREV_BLKP(bp), bp] 사이였다면 앞 블록 시작으로
+        if ((char *)rover >= (char *)PREV_BLKP(bp) && (char *)rover <= (char *)bp){
+            rover = PREV_BLKP(bp);
+        }
+
         size += GET_SIZE(HDRP(PREV_BLKP(bp))); // 현재 블록 크기에 앞에 블록 크기 추가
         PUT(FTRP(bp), PACK(size, 0)); // 푸터 최신화 (현재 위치 유지)
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0)); // 헤더 최신화 (앞 블록 위치)
         bp = PREV_BLKP(bp); // 앞에 붙였으므로 시작점 포인터를 앞에 블록으로 바꿈
+
     }else{ // 4. 이전 다음 블록 모두 가용 -> 모두 병합
+        // next_fit : rover가 [PREV_BLKP(bp), NEXT_BLKP(bp)] 사이였다면 앞 블록 시작
+        if ((char *)bp >= (char *)PREV_BLKP(bp) && (char *)bp <= (char *)NEXT_BLKP(bp)){
+            rover = PREV_BLKP(bp);
+        }
+
         size += GET_SIZE(HDRP(NEXT_BLKP(bp))) + GET_SIZE(HDRP(PREV_BLKP(bp))); // 현재 블록 크기에 앞+뒤 블록 크기 추가
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0)); // 헤더 최신화 (앞 블록 위치)
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0)); // 푸터 최신화 (뒤 블록 위치)
@@ -184,7 +201,7 @@ static void *find_fit(size_t asize)
     }
 
     // 힙 시작에서 rover까지
-    for(bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)){
+    for(bp = heap_listp; bp < rover; bp = NEXT_BLKP(bp)){
         if(!GET_ALLOC(HDRP(bp)) && asize <= GET_SIZE(HDRP(bp))){
             rover = bp; // 찾은 위치를 rover에 기록
             return bp;
