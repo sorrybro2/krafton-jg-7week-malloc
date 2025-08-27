@@ -25,7 +25,22 @@
  *   // Or pass -DALLOC_POLICY=POLICY_IMPLICIT_FF / POLICY_IMPLICIT_NF at compile time.
  *
  * Notes
- * -----
+ * ---- make mdriver command (컴파일 명령어)
+ *
+ * 가용 리스트 만드는 방식과 메모리 할당 정책에 따라 오브젝트 파일을 다르게 만듭니다!
+ *
+ * 암시적 가용 리스트 + first-fit 정책
+ * make clean && make CFLAGS+=' -DALLOC_POLICY=POLICY_IMPLICIT_FF'
+ * 암시적 가용 리스트 + next-fit 정책
+ * make clean && make CFLAGS+=' -DALLOC_POLICY=POLICY_IMPLICIT_NF'
+ * 명시적 가용 리스트 + first-fit 정책
+ * make clean && make CFLAGS+=' -DALLOC_POLICY=POLICY_EXPLICIT_FF'
+ * 분리 가용 리스트 + best-fit 정책
+ * make clean && make CFLAGS+=' -DALLOC_POLICY=POLICY_SEGREGATED_BF'
+ * 
+ * 실행 : ./mdriver -V
+ * ----
+ * 
  * - Block layout: | header | payload ... | footer |
  *   header/footer store (size | alloc-bit). Size is multiple of 8.
  * - MIN_BLOCK is policy-aware:
@@ -38,6 +53,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdint.h>
 
 #include "mm.h"
 #include "memlib.h"
@@ -87,6 +103,7 @@ team_t team = {
 #define POLICY_IMPLICIT_FF 1 // 암시적 가용 리스트 + first-fit 정책
 #define POLICY_IMPLICIT_NF 2 // 암시적 가용 리스트 + next-fit 정책  
 #define POLICY_EXPLICIT_FF 3 // 명시적 가용 리스트 + first-fit 정책
+#define POLICY_SEGREGATED_BF 4 // 분리 가용 리스트 + best-fit 정책
 
 #ifndef ALLOC_POLICY
 #define ALLOC_POLICY POLICY_EXPLICIT_FF // 기본값: 명시적 first-fit
@@ -99,17 +116,6 @@ static void *find_fit(size_t asize); // policy-specific - 적합한 가용 블�
 static void place(void *bp, size_t asize); // 블록에 요청 크기만큼 할당하고 나머지는 분할
 
 static char *heap_listp = NULL; /* prologue payload ptr - 프롤로그 블록의 payload 포인터 */
-
-/* -------------------------- make mdriver command (컴파일 명령어) -------------------------- */
-
-// 가용 리스트 만드는 방식과 메모리 할당 정책에 따라 오브젝트 파일을 다르게 만듭니다!
-
-// 암시적 가용 리스트 + first-fit 정책
-// make clean && make CFLAGS+=' -DALLOC_POLICY=POLICY_IMPLICIT_FF'
-// 암시적 가용 리스트 + next-fit 정책
-// make clean && make CFLAGS+=' -DALLOC_POLICY=POLICY_IMPLICIT_NF'
-// 명시적 가용 리스트 + first-fit 정책
-// make clean && make CFLAGS+=' -DALLOC_POLICY=POLICY_EXPLICIT_FF'
 
 /* -------------------- Explicit free list (policy hooks) -------------------- */
 #if ALLOC_POLICY == POLICY_EXPLICIT_FF
@@ -126,12 +132,46 @@ static char *free_listp = NULL;       /* head of explicit free list - 명시적 
 static char *rover = NULL;            /* next-fit rover - next-fit용 탐색 시작 지점 포인터 */
 #endif
 
+/* ------------------- Segregated free lists (policy hooks) ------------------- */
+#if ALLOC_POLICY == POLICY_SEGREGATED_BF
+#  define PTRSIZE              (sizeof(void *)) // 포인터 크기 (보통 8바이트)
+#  define PREV_FREEP(bp)       (*(char **)(bp)) // 가용 블록 payload의 첫 번째 포인터 - 이전 가용 블록 주소
+#  define NEXT_FREEP(bp)       (*(char **)((char *)(bp) + PTRSIZE)) // 가용 블록 payload의 두 번째 포인터 - 다음 가용 블록 주소
+#  define SET_PREV(bp, p)      (PREV_FREEP(bp) = (char *)(p)) // 이전 가용 블록 포인터 설정
+#  define SET_NEXT(bp, p)      (NEXT_FREEP(bp) = (char *)(p)) // 다음 가용 블록 포인터 설정
+
+#  define SEGREGATED_CLASSES   10 // 분리 리스트 개수 (크기 클래스별)
+static char *segregated_lists[SEGREGATED_CLASSES]; /* 크기별 분리 가용 리스트 배열 */
+
+// 크기 클래스 경계값들 (2^4=16, 2^5=32, 2^6=64, ..., 2^13=8192, 그 이상)
+// Class 0: 16-31B, Class 1: 32-63B, ..., Class 9: 8192B+
+#  define SIZE_CLASS_0_MIN     16
+#  define SIZE_CLASS_0_MAX     31
+#  define SIZE_CLASS_1_MIN     32
+#  define SIZE_CLASS_1_MAX     63
+#  define SIZE_CLASS_2_MIN     64
+#  define SIZE_CLASS_2_MAX     127
+#  define SIZE_CLASS_3_MIN     128
+#  define SIZE_CLASS_3_MAX     255
+#  define SIZE_CLASS_4_MIN     256
+#  define SIZE_CLASS_4_MAX     511
+#  define SIZE_CLASS_5_MIN     512
+#  define SIZE_CLASS_5_MAX     1023
+#  define SIZE_CLASS_6_MIN     1024
+#  define SIZE_CLASS_6_MAX     2047
+#  define SIZE_CLASS_7_MIN     2048
+#  define SIZE_CLASS_7_MAX     4095
+#  define SIZE_CLASS_8_MIN     4096
+#  define SIZE_CLASS_8_MAX     8191
+// Class 9: 8192B 이상
+#endif
+
 /* ---------------------- MIN_BLOCK depends on policy ------------------------ */
-#if ALLOC_POLICY == POLICY_EXPLICIT_FF
+#if ALLOC_POLICY == POLICY_EXPLICIT_FF || ALLOC_POLICY == POLICY_SEGREGATED_BF
 #  ifndef PTRSIZE
 #    define PTRSIZE (sizeof(void *))
 #  endif
-#  define MIN_BLOCK ALIGN(WSIZE /*hdr*/ + 2*PTRSIZE /*prev,next*/ + WSIZE /*ftr*/) // 명시적: 헤더(4) + 이전포인터(8) + 다음포인터(8) + 푸터(4) = 대략 24B
+#  define MIN_BLOCK ALIGN(WSIZE /*hdr*/ + 2*PTRSIZE /*prev,next*/ + WSIZE /*ftr*/) // 명시적/분리: 헤더(4) + 이전포인터(8) + 다음포인터(8) + 푸터(4) = 대략 24B
 #else
 #  define MIN_BLOCK (2*DSIZE) // 암시적: 헤더(4) + 푸터(4) + 최소 payload(8) = 16B
 #endif
@@ -155,6 +195,11 @@ int mm_init(void)
 
 #if ALLOC_POLICY == POLICY_EXPLICIT_FF
     free_listp = NULL; // 명시적 가용 리스트 초기화 - 빈 리스트로 시작
+#elif ALLOC_POLICY == POLICY_SEGREGATED_BF
+    // 분리 가용 리스트 초기화 - 모든 크기 클래스를 빈 리스트로 시작
+    for (int i = 0; i < SEGREGATED_CLASSES; i++) {
+        segregated_lists[i] = NULL;
+    }
 #endif
 #if ALLOC_POLICY == POLICY_IMPLICIT_NF
     rover = heap_listp; // next-fit용 rover를 힙 시작점으로 초기화
@@ -219,6 +264,65 @@ static void remove_free_block(void *bp)
 }
 #endif
 
+/******************* Segregated free list management *******************/
+#if ALLOC_POLICY == POLICY_SEGREGATED_BF
+/*
+ * get_size_class - 블록 크기에 해당하는 분리 리스트 클래스 번호 반환
+ * 크기에 따라 0~9 클래스로 분류한다.
+ */
+static int get_size_class(size_t size)
+{
+    // 이진 로그를 이용한 효율적인 클래스 결정
+    if (size < 32) return 0;        // 16-31B
+    if (size < 64) return 1;        // 32-63B  
+    if (size < 128) return 2;       // 64-127B
+    if (size < 256) return 3;       // 128-255B
+    if (size < 512) return 4;       // 256-511B
+    if (size < 1024) return 5;      // 512-1023B
+    if (size < 2048) return 6;      // 1024-2047B
+    if (size < 4096) return 7;      // 2048-4095B
+    if (size < 8192) return 8;      // 4096-8191B
+    return 9;                       // 8192B+
+}
+
+/*
+ * insert_segregated_block - 해당 크기 클래스의 분리 리스트에 블록 추가 (LIFO 방식)
+ * 크기에 맞는 분리 리스트의 맨 앞에 삽입한다.
+ */
+static void insert_segregated_block(void *bp)
+{
+    size_t size = GET_SIZE(HDRP(bp));
+    int class = get_size_class(size);
+    
+    SET_PREV(bp, NULL); // 새로 넣을 노드가 head가 될 것이므로 이전 노드는 NULL
+    SET_NEXT(bp, segregated_lists[class]); // 새 head의 next는 기존 head를 가리킴
+
+    if (segregated_lists[class]) SET_PREV(segregated_lists[class], bp); // 기존 head가 있다면 그것의 prev를 bp로 설정
+    segregated_lists[class] = (char *)bp; // 헤드 포인터를 bp로 갱신하여 bp가 새 head가 됨
+}
+
+/*
+ * remove_segregated_block - 해당 크기 클래스의 분리 리스트에서 블록 제거
+ * 지정된 블록을 분리 리스트에서 제거하고 앞뒤 연결을 수정한다.
+ */
+static void remove_segregated_block(void *bp)
+{
+    size_t size = GET_SIZE(HDRP(bp));
+    int class = get_size_class(size);
+    
+    char *prev = PREV_FREEP(bp); // 제거할 블록의 이전 블록 주소
+    char *next = NEXT_FREEP(bp); // 제거할 블록의 다음 블록 주소
+
+    // bp의 이전 블록이 있다면 그것의 next를 bp의 next로 연결
+    // 없다면 (bp가 head였다면) 해당 클래스의 head를 bp의 next로 변경
+    if (prev) SET_NEXT(prev, next); 
+    else      segregated_lists[class] = next;
+    
+    // bp의 다음 블록이 있다면 그것의 prev를 bp의 prev로 연결
+    if (next) SET_PREV(next, prev);
+}
+#endif
+
 /********************************* coalesce ***********************************/
 /*
  * coalesce - 인접한 가용 블록들과 현재 블록을 병합
@@ -249,10 +353,10 @@ static void *coalesce(void *bp)
         void *prev = PREV_BLKP(bp); // 이전 블록 포인터
         remove_free_block(prev); // 이전 블록을 가용 리스트에서 제거
         size += GET_SIZE(HDRP(prev)); // 현재 블록 크기에 이전 블록 크기 추가
+        PUT(FTRP(bp), PACK(size, 0)); // 병합된 블록의 푸터 설정 (현재 위치)
         PUT(HDRP(prev), PACK(size, 0)); // 병합된 블록의 헤더 설정 (이전 블록 위치)
-        PUT(FTRP(prev), PACK(size, 0)); // 병합된 블록의 푸터 설정 (현재 블록 위치)
         insert_free_block(prev); // 병합된 블록을 가용 리스트에 추가
-        return prev; // 병합 후 시작점은 이전 블록
+        return prev;
     } else { // Case 4: 이전과 다음 블록이 모두 가용 - 삼중 병합
         void *prev = PREV_BLKP(bp); // 이전 블록 포인터
         void *next = NEXT_BLKP(bp); // 다음 블록 포인터
@@ -260,8 +364,39 @@ static void *coalesce(void *bp)
         remove_free_block(next); // 다음 블록을 가용 리스트에서 제거
         size += GET_SIZE(HDRP(prev)) + GET_SIZE(HDRP(next)); // 세 블록의 크기 모두 합산
         PUT(HDRP(prev), PACK(size, 0)); // 병합된 블록의 헤더 설정 (이전 블록 위치)
-        PUT(FTRP(prev), PACK(size, 0)); // 병합된 블록의 푸터 설정 (다음 블록 위치)
+        PUT(FTRP(next), PACK(size, 0)); // 병합된 블록의 푸터 설정 (다음 블록 위치)
         insert_free_block(prev); // 병합된 블록을 가용 리스트에 추가
+        return prev;
+    }
+#elif ALLOC_POLICY == POLICY_SEGREGATED_BF
+    if (prev_alloc && next_alloc) { // Case 1: 이전과 다음 블록이 모두 할당됨 - 병합 불가
+        insert_segregated_block(bp); // 현재 블록만 해당 크기 클래스 리스트에 추가
+        return bp;
+    } else if (prev_alloc && !next_alloc) { // Case 2: 이전 블록은 할당, 다음 블록은 가용 - 다음과 병합
+        void *next = NEXT_BLKP(bp); // 다음 블록 포인터
+        remove_segregated_block(next); // 다음 블록을 해당 크기 클래스 리스트에서 제거
+        size += GET_SIZE(HDRP(next)); // 현재 블록 크기에 다음 블록 크기 추가
+        PUT(HDRP(bp), PACK(size, 0)); // 병합된 블록의 헤더 설정 (현재 위치)
+        PUT(FTRP(bp), PACK(size, 0)); // 병합된 블록의 푸터 설정 (다음 블록 위치)
+        insert_segregated_block(bp); // 병합된 블록을 새로운 크기에 맞는 클래스 리스트에 추가
+        return bp;
+    } else if (!prev_alloc && next_alloc) { // Case 3: 이전 블록은 가용, 다음 블록은 할당 - 이전과 병합
+        void *prev = PREV_BLKP(bp); // 이전 블록 포인터
+        remove_segregated_block(prev); // 이전 블록을 해당 크기 클래스 리스트에서 제거
+        size += GET_SIZE(HDRP(prev)); // 현재 블록 크기에 이전 블록 크기 추가
+        PUT(FTRP(bp), PACK(size, 0)); // 병합된 블록의 푸터 설정 (현재 위치)
+        PUT(HDRP(prev), PACK(size, 0)); // 병합된 블록의 헤더 설정 (이전 블록 위치)
+        insert_segregated_block(prev); // 병합된 블록을 새로운 크기에 맞는 클래스 리스트에 추가
+        return prev; // 병합 후 시작점은 이전 블록
+    } else { // Case 4: 이전과 다음 블록이 모두 가용 - 삼중 병합
+        void *prev = PREV_BLKP(bp); // 이전 블록 포인터
+        void *next = NEXT_BLKP(bp); // 다음 블록 포인터
+        remove_segregated_block(prev); // 이전 블록을 해당 크기 클래스 리스트에서 제거
+        remove_segregated_block(next); // 다음 블록을 해당 크기 클래스 리스트에서 제거
+        size += GET_SIZE(HDRP(prev)) + GET_SIZE(HDRP(next)); // 세 블록의 크기 모두 합산
+        PUT(HDRP(prev), PACK(size, 0)); // 병합된 블록의 헤더 설정 (이전 블록 위치)
+        PUT(FTRP(next), PACK(size, 0)); // 병합된 블록의 푸터 설정 (다음 블록 위치)
+        insert_segregated_block(prev); // 병합된 블록을 새로운 크기에 맞는 클래스 리스트에 추가
         return prev; // 병합 후 시작점은 이전 블록
     }
 #else /* IMPLICIT (FF or NF) - 암시적 가용 리스트의 경우 */
@@ -337,6 +472,31 @@ static void *find_fit(size_t asize)
         }
     }
     return NULL; // 적합한 블록 없음
+#elif ALLOC_POLICY == POLICY_SEGREGATED_BF
+    // 분리 가용 리스트 + best-fit: 해당 크기 클래스부터 시작해서 best-fit 탐색
+    int start_class = get_size_class(asize);
+    void *best_bp = NULL;
+    size_t best_size = SIZE_MAX;
+    
+    // 요청 크기에 맞는 클래스부터 시작해서 상위 클래스들을 순회
+    for (int class = start_class; class < SEGREGATED_CLASSES; class++) {
+        // 해당 클래스의 리스트를 순회하며 best-fit 찾기
+        for (char *bp = segregated_lists[class]; bp != NULL; bp = NEXT_FREEP(bp)) {
+            size_t block_size = GET_SIZE(HDRP(bp));
+            if (block_size >= asize) {
+                // 현재까지 찾은 best보다 더 적합한(작은) 블록이면 업데이트
+                if (block_size < best_size) {
+                    best_bp = bp;
+                    best_size = block_size;
+                    // 정확히 맞는 크기를 찾았으면 즉시 반환 (perfect fit)
+                    if (best_size == asize) return best_bp;
+                }
+            }
+        }
+        // 해당 클래스에서 적합한 블록을 찾았으면 반환 (하위 클래스에서 찾는 것이 더 효율적)
+        if (best_bp) return best_bp;
+    }
+    return NULL; // 적합한 블록 없음
 #else /* POLICY_IMPLICIT_FF */
     // 암시적 first-fit: 힙 시작부터 순회하며 첫 번째 적합한 블록 반환
     for (char *bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
@@ -358,6 +518,8 @@ static void place(void *bp, size_t asize)
 
 #if ALLOC_POLICY == POLICY_EXPLICIT_FF
     remove_free_block(bp); // 명시적: 할당하기 전에 가용 리스트에서 제거
+#elif ALLOC_POLICY == POLICY_SEGREGATED_BF
+    remove_segregated_block(bp); // 분리: 할당하기 전에 해당 클래스 리스트에서 제거
 #endif
 
     // 할당 후 남는 공간이 최소 블록 크기 이상이면 분할
@@ -374,8 +536,9 @@ static void place(void *bp, size_t asize)
 
 #if ALLOC_POLICY == POLICY_EXPLICIT_FF
         insert_free_block(nbp); // 명시적: 새 가용 블록을 리스트에 추가
-#endif
-#if ALLOC_POLICY == POLICY_IMPLICIT_NF
+#elif ALLOC_POLICY == POLICY_SEGREGATED_BF
+        insert_segregated_block(nbp); // 분리: 새 가용 블록을 해당 클래스 리스트에 추가
+#elif ALLOC_POLICY == POLICY_IMPLICIT_NF
         rover = nbp; // next-fit: 분할된 가용 블록을 다음 탐색 시작점으로 설정
 #endif
     } else {
@@ -469,6 +632,8 @@ void *mm_realloc(void *ptr, size_t size)
         if (combined >= asize) { // 병합 후 크기가 요청 크기 이상이면
 #if ALLOC_POLICY == POLICY_EXPLICIT_FF
             remove_free_block(next); // 명시적: 다음 블록을 가용 리스트에서 제거
+#elif ALLOC_POLICY == POLICY_SEGREGATED_BF
+            remove_segregated_block(next); // 분리: 다음 블록을 해당 클래스 리스트에서 제거
 #endif
             PUT(HDRP(ptr), PACK(combined, 1)); // 병합된 블록으로 헤더 설정
             PUT(FTRP(ptr), PACK(combined, 1)); // 병합된 블록으로 푸터 설정
